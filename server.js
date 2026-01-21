@@ -273,7 +273,91 @@ app.post('/auth/login', (req, res) => {
   });
 });
 
-// Google Sign-In
+// Google OAuth redirect endpoint
+app.get('/auth/google', (req, res) => {
+  const redirectUri = `${process.env.FRONTEND_URL || 'http://localhost:3000'}/auth/callback`;
+  const scope = 'email profile';
+  
+  const authUrl = `https://accounts.google.com/o/oauth2/v2/auth?` +
+    `client_id=${GOOGLE_CLIENT_ID}&` +
+    `redirect_uri=${encodeURIComponent(redirectUri)}&` +
+    `response_type=code&` +
+    `scope=${encodeURIComponent(scope)}&` +
+    `access_type=offline&` +
+    `prompt=consent`;
+  
+  res.redirect(authUrl);
+});
+
+// Google OAuth callback endpoint
+app.post('/auth/google-callback', async (req, res) => {
+  const { code } = req.body;
+  
+  if (!code) {
+    return res.status(400).json({ error: "Authorization code is required" });
+  }
+
+  try {
+    // Exchange code for tokens
+    const redirectUri = `${process.env.FRONTEND_URL || 'http://localhost:3000'}/auth/callback`;
+    const tokenResponse = await fetch('https://oauth2.googleapis.com/token', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded',
+      },
+      body: new URLSearchParams({
+        client_id: GOOGLE_CLIENT_ID,
+        client_secret: process.env.GOOGLE_CLIENT_SECRET || '',
+        code,
+        grant_type: 'authorization_code',
+        redirect_uri: redirectUri,
+      }),
+    });
+
+    const tokenData = await tokenResponse.json();
+    
+    if (tokenData.error) {
+      return res.status(400).json({ error: tokenData.error_description });
+    }
+
+    // Get user info with access token
+    const userResponse = await fetch('https://www.googleapis.com/oauth2/v2/userinfo', {
+      headers: {
+        Authorization: `Bearer ${tokenData.access_token}`,
+      },
+    });
+
+    const userData = await userResponse.json();
+    const { email, id: googleId } = userData;
+
+    // Check if user exists
+    db.get('SELECT * FROM users WHERE email = ? OR googleId = ?', [email, googleId], (err, user) => {
+      if (err) return res.status(500).json({ error: err.message });
+      
+      if (user) {
+        // Update Google ID if missing
+        if (!user.googleId) {
+          db.run('UPDATE users SET googleId = ?, isEmailVerified = 1 WHERE id = ?', [googleId, user.id]);
+        }
+        const token = jwt.sign({ id: user.id, email }, SECRET, { expiresIn: '7d' });
+        res.json({ token });
+      } else {
+        // Create new user
+        db.run('INSERT INTO users (email, googleId, isEmailVerified) VALUES (?, ?, 1)', 
+          [email, googleId], function(err) {
+            if (err) return res.status(500).json({ error: err.message });
+            const token = jwt.sign({ id: this.lastID, email }, SECRET, { expiresIn: '7d' });
+            res.json({ token });
+          });
+      }
+    });
+  } catch (error) {
+    console.error('Google OAuth callback error:', error);
+    res.status(500).json({ error: "Google authentication failed" });
+  }
+});
+
+// Google Sign-In (for direct token method)
 app.post('/auth/google-signin', async (req, res) => {
   const { tokenId } = req.body;
   
